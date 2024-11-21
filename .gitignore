@@ -1,0 +1,6 @@
+.vscode/*
+node_modules/*
+types/*
+workspace.code-workspace
+dist/**/*
+*.tgz
