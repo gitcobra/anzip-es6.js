@@ -70,11 +70,11 @@ var blob = azip.zip();
 - Return Value: `boolean`
 - Return whether it was already zipped.
 
-### list(`includeDirFlag`)
+### list([`includeDirFlag`])
 - Returl Value: `string[]`
 - List up all zipped file paths. When `includeDirFlag` is true, include directories themselves.
 
-### count([`includeDir`])
+### count([`includeDirFlag`])
 - `includeDir`(optional): `boolean`
 - Return Value: `number`
 - Get stored file count.

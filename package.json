@@ -1,6 +1,6 @@
 {
   "name": "@gitcobra/anzip-es6",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "create an uncompressed zip file",
   "type": "module",
   "main": "dist/anzip-es6.js",
@@ -9,7 +9,7 @@
     "dist/**/*.js",
     "dist/**/*.d.ts"
   ],
-  "types": "types/anzip-es6.d.ts",
+  "types": "./dist/anzip-es6.d.ts",
   "directories": {},
   "devDependencies": {
     "@rollup/plugin-typescript": "^12.1.1",
@@ -24,7 +24,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gitcobra/AnZip.js.git"
+    "url": "git@github.com:gitcobra/anzip-es6.js.git"
   },
   "author": "gitcobra",
   "license": "ISC",
