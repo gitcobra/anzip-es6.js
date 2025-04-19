@@ -11,7 +11,12 @@
   azip.add('dir4/blob.bin', dat3);
   azip.add('dir5/blob.bin', dat3);
   azip.remove('dir4/blob.bin');
-  azip.get("hoge");
+  azip.add('text2.txt', 'txt2');
+  azip.add('text3.txt', 'txt3');
+  azip.zip(true);
+  
+  console.log( azip.get('dir4/blob.bin') );
+  console.log( azip.get('text2.txt') );
 
   return azip;
 }

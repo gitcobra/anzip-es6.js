@@ -43,13 +43,14 @@ var blob = azip.zip();
   - Path to directory or file in the zip. Forward slash('/') and backslash('\\') are both allowed for directory separators.
 - `data` (optional): `TypedArray` | `Array` | `string` | `ArrayBuffer` | `Buffer` | `Blob`
   - Data you want to store. If omitted, it just constructs directories.
-- Return Value: `void` | `Promise<boolean>`
+- Return Value: `Promise<boolean>`
   - NOTE: When the `data` parameter is a `Blob`, this method calculates CRC asynchronously and returns a `Promise` that resolves a `boolean` value of success or failure for the adding process.
 - Construct directories in the zip then add a data if specified. Throw an Error when you try to add any data to a file path already exists.
 
-### zip()
+### zip([`close`])
+- `close`: `boolean`
 - Return Value: `Blob`
-- Close the zip data and output as a Blob.
+- Output all added files as a `Blob`, and close the zip if `close` flag is `true`.
 
 ### get(`path` [,`blobType`])
 - `path`: `string` | `number`
@@ -64,11 +65,11 @@ var blob = azip.zip();
 
 ### remove(`path`)
 - `path`: `string` | `number`
-- Remove a file from the zip data. *It cannot remove directories.
+- Remove a file from the zip data. *currently it cannot remove directories.
 
 ### isZipped()
 - Return Value: `boolean`
-- Return whether it was already zipped.
+- Return whether it was already closed.
 
 ### list([`includeDirFlag`])
 - Returl Value: `string[]`

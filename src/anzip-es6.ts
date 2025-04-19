@@ -21,13 +21,16 @@ https://pkwaredownloads.blob.core.windows.net/pem/APPNOTE.txt
       [encryption header n]
       [file data n]
       [data descriptor n]
+
       [archive decryption header] 
       [archive extra data record] 
+      
       [central directory header 1]
       .
       .
       .
       [central directory header n]
+      
       [zip64 end of central directory record]
       [zip64 end of central directory locator] 
       [end of central directory record]
@@ -48,8 +51,7 @@ const CentralDirHeaderRest_NotFile = new Blob( [Uint8Array.from([0x00,0x00, 0x00
 
 const txtenc = new TextEncoder();
 
-
-
+type AcceptableDataTypes = number[] | Uint8Array | ArrayBuffer | Buffer | string;
 type DirRecord = {
   offset: number;
   size: number;
@@ -61,7 +63,6 @@ type DirRecord = {
 
 export default class AnZip {
   private _zippedBlob: Blob | null;
-  private _isPending: boolean;
   private _resolvingCRCPromise: Promise<any> | null;
   /**
   * directory record
@@ -99,7 +100,12 @@ export default class AnZip {
   * total size of all files
   */
   private _dataSize: number;
-  
+
+
+  public static getCRC32(dat: AcceptableDataTypes | Blob) {
+
+  }
+
 
   /**
   * AnZip constructor
@@ -126,15 +132,12 @@ export default class AnZip {
     this._fileCount = 0;
     this._dataSize = 0;
     this._zippedBlob = null;
-    this._isPending = false;
     this._resolvingCRCPromise = null;
   }
   /**
   * add path and data
   */
-  add(path: string, data: Blob, dateArg?: Date | any): Promise<any>;
-  add(path: string, data?: number[] | Uint8Array | ArrayBuffer | Buffer | string, dateArg?: Date | any): void;
-  add(path: string, data?: number[] | Uint8Array | ArrayBuffer | Buffer | string | Blob, dateArg?: Date | any, clone?: boolean) {
+  add(path: string, data?: Blob | AcceptableDataTypes, dateArg?: any, precalculatedCRC?: number): Promise<number> {
     if( this._zippedBlob )
       throw new Error('the AnZip object was already zipped. create a new instance or execute clear() before adding a file.');
     
@@ -153,7 +156,7 @@ export default class AnZip {
 
     // check file
     let dataSize = 0;
-    let crc = 0;
+    let crc;
     let storeData: Uint8Array | Buffer | Blob | null = null;
     if( typeof data !== 'undefined' ) {
       // file name has to be specified
@@ -162,6 +165,13 @@ export default class AnZip {
       // check for duplication
       if( this.has(path) )
         throw new Error('the path already exists: "' + path + '"');
+      
+      // check if precalculated CRC exists
+      if( typeof precalculatedCRC !== 'undefined' ) {
+        if( typeof precalculatedCRC !== 'number' )
+          throw new Error('precalculatedCRC must be a number');
+        crc = precalculatedCRC;
+      }
       
       if( !(data instanceof Blob) ) {
         if( data instanceof Uint8Array || typeof Buffer === 'function' && data instanceof Buffer )
@@ -177,12 +187,18 @@ export default class AnZip {
           throw new Error('data must be one of the following types Array, TypedArray, ArrayBuffer, Buffer, string, or Blob.');
         }
         
-        crc = getCRC32( storeData );
-        dataSize = storeData.length;
+        // calculate CRC synchronously
+        if( crc === undefined ) {
+          crc = calculateCRC32( storeData );
+        }
+        dataSize = storeData.byteLength;
       }
       else {
         storeData = data;
         dataSize = data.size;
+        // calculating CRC is postponed when it is a Blob
+        if( crc === undefined )
+          crc = 0;
       }
     }
 
@@ -193,7 +209,7 @@ export default class AnZip {
       date = dateArg;
     else if( typeof dateArg === 'undefined' || dateArg === -1 )
       date = new Date();
-    else if( dateArg > 0 )
+    else if( dateArg >= 0 )
       date = new Date(dateArg);
 
     const dateArray = !date ? [0, 0, 0, 0] : getAs32ArrayLE((date.getFullYear() - 1980) << 25 | (date.getMonth() + 1) << 21 | date.getDate() << 16 | date.getHours() << 11 | date.getMinutes() << 5 | date.getSeconds() / 2);
@@ -256,10 +272,18 @@ export default class AnZip {
           file name (variable size)
           extra field (variable size)
       */
-
+      
       // *same part as cdh*
       // date(4) CRC(4) size(4) size(4) pathLength(2) extraLength(2)
-      samePartLocalAndCentral = Uint8Array.from( dateArray.concat(isFile ? getAs32ArrayLE(crc) : [0,0,0,0], dataSizeArray32, dataSizeArray32, [pathLength & 0xFF, pathLength >> 8 & 0xFF, 0x00, 0x00]) );
+      samePartLocalAndCentral = Uint8Array.from(
+        ([] as number[]).concat(
+          dateArray,
+          isFile ? getAs32ArrayLE(crc!) : [0,0,0,0],
+          dataSizeArray32,
+          dataSizeArray32,
+          [pathLength & 0xFF, pathLength >> 8 & 0xFF, 0x00, 0x00]
+        )
+      );
 
       lastLocalFileBlock = [LocalFileHeaderStart, samePartLocalAndCentral, pathArray];
       this._localFileChunks.push( lastLocalFileBlock );
@@ -302,10 +326,15 @@ export default class AnZip {
             extra field (variable size)
             file comment (variable size)
       */
-
       const centralRest = isFile ? CentralDirHeaderRest_File : CentralDirHeaderRest_NotFile;
       const localOffset = Uint8Array.from( getAs32ArrayLE(this._curLocalFileHeaderOffset) );
-      this._centralDirHeaderChunks.push([CentralDirHeaderStart, samePartLocalAndCentral, centralRest, localOffset, pathArray]);
+      this._centralDirHeaderChunks.push([
+        CentralDirHeaderStart,
+        samePartLocalAndCentral,
+        centralRest,
+        localOffset,
+        pathArray
+      ]);
       
       // increase offset
       this._centralDirHeaderLen += CENTRAL_HEADER_BASE_LENGTH + pathLength;
@@ -314,66 +343,58 @@ export default class AnZip {
 
 
     // add file data
-    let blobPromise: Promise<any> | void = undefined;
+    let blobPromise: Promise<any> | undefined;
     if( storeData ) {
-      if( storeData instanceof Blob ) {
-        blobPromise = this._resolveBlobCRC(storeData, samePartLocalAndCentral!, path);
-      }
-      else if( clone ) {
-        storeData = new Blob([storeData]);
+      // asynchronously calculate CRC when it is a Blob
+      if( precalculatedCRC === undefined ) {
+        if( storeData instanceof Blob ) {
+          blobPromise = this._resolveBlobCRC(storeData, samePartLocalAndCentral!, path);
+        }
       }
 
-      //this._localFiles.push( storeData );
       lastLocalFileBlock!.push(storeData);
       this._dataSize += dataSize;
       this._fileCount++;
     }
+    let pathCount = this._pathCount;
 
-    return blobPromise;
+    return (blobPromise || Promise.resolve()).then(() => pathCount);
   }
-  private async _resolveBlobCRC(blob: Blob, header: Uint8Array, path: string) {
-    const prevPromise = this._resolvingCRCPromise;
+  private _resolveBlobCRC(blob: Blob, header: Uint8Array, path: string) {
     let resolve: (val?: any) => any;
-    const currentPromise = new Promise(res => resolve = res);
+    let reject: (val?: any) => any;
+    const prevPromise = this._resolvingCRCPromise || Promise.resolve();
+    const currentPromise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    
     this._resolvingCRCPromise = currentPromise;
-    this._isPending = true;
     
-    
-    // create ArrayBuffer from Blob
-    const bufpromise = blob.arrayBuffer?.() || new Promise<ArrayBuffer>(res => {
-      const fr = new FileReader();
-      fr.onload = () => {
-        res( fr.result as ArrayBuffer );
-      };
-      fr.readAsArrayBuffer(blob);
-    });
-
     // wait until previous promise is fulfilled
-    await prevPromise;
-
-    // calculate CRC
     let success = false;
-    bufpromise.then((buffer) => {
-      // write CRC asynchronously
-      const crc = getCRC32( new Uint8Array(buffer) );
-      new DataView(header.buffer).setUint32(4, crc, true);
-      success = true;
-    }).catch(e => {
-      this.remove(path);
-      //resolve(false);
-      throw new Error(`${e.message}\ncould not resolve the blob CRC.`);
-    }).finally(() => {
-      if( this._resolvingCRCPromise === currentPromise ) {
-        this._isPending = false;
-      }
-      resolve(success);
+    prevPromise.finally(() => {
+      // calculate CRC
+      getBlobCRC(blob).then(crc => {
+        // write CRC asynchronously
+        new DataView(header.buffer).setUint32(4, crc, true);
+        success = true;
+      }).catch(e => {
+        this.remove(path);
+        throw new Error(`${e.message}\ncould not resolve the blob CRC.`);
+      }).finally(() => {
+        if( this._resolvingCRCPromise === currentPromise ) {
+          this._resolvingCRCPromise = null;
+        }
+        success ? resolve() : reject();
+      });
     });
-
 
     return currentPromise;
   }
   private _checkPending() {
-    if( this._isPending )
+    //if( this._isPending )
+    if( this._resolvingCRCPromise )
       throw new Error(`the AnZip object is still pending. execute wait() and await the fulfillment of the Promise beforehand.`);
   }
   private _getFileRecord(index: number | string): DirRecord | null {
@@ -387,45 +408,25 @@ export default class AnZip {
     return rec || null;
   }
   /**
-   * NOTE: this method is asynchronous and returns a Promise.
-   */
-  /*
-  async addBlob(path: string, data: Blob, dateArg?: Date | any): Promise<void> {
-    if( !(data instanceof Blob) )
-      throw new Error(`argument 2 must be a Blob object`);
-    
-    const prevPromise = this._pendingBlobPromise;
-    
-    let resolve: (val?: any) => any;
-    this._pendingBlobPromise = new Promise(res => resolve = res);
-    
-    // resolve ArrayBuffer for CRC
-    const bufpromise = data.arrayBuffer();
-    
-    await prevPromise;
-    
-    return bufpromise.then((buffer) => {
-      this.add(path, buffer, dateArg, data);
-    }).finally( resolve );
-  }
-  */
-  /**
-  * return whether the path already exists
+  * return whether the path exists
   */
   has(path: string): boolean {
     return !!this._dirRecords.has( path.replace(/\/+$/, '') );
   }
   size() {
     return this._dataSize;
-  };
+  }
   count(all?: boolean) {
     return all ? this._pathCount : this._fileCount;
   }
+
+  /*
+  * get method is always synchlonous
+  */
   get(index: number | string): Blob | Uint8Array | Buffer | null;
   get(index: number | string, blobType: string): Blob | null;
   get(index: number | string, blobType?: string) {
-    let rec = this._getFileRecord(index);
-
+    const rec = this._getFileRecord(index);
     if( rec && rec.isFile ) {
       if( this._zippedBlob ) {      
         const {offset, size, pathLength} = rec;
@@ -433,8 +434,6 @@ export default class AnZip {
         return this._zippedBlob.slice(headerlen, headerlen + size, blobType);
       }
       else {
-        //const {indexForLocalFile} = dat;
-        //return this._localFiles[indexForLocalFile];
         const num = this._dirRecList.indexOf(rec);
         const dat = this._localFileChunks[num][3]!;
         if( typeof blobType === 'string' ) {
@@ -447,6 +446,7 @@ export default class AnZip {
 
     return null;
   }
+
   getPathByIndex(index: number) {
     return this._dirRecFileList[index]?.path || '';
   }
@@ -464,18 +464,21 @@ export default class AnZip {
     const localChunk = this._localFileChunks.splice(num, 1)[0];
     const centralChunk = this._centralDirHeaderChunks.splice(num, 1)[0];
     
-    // decrease offset
+    // decrease offsets
     const localChunkSize = LOCAL_HEADER_BASE_LENGTH + rec.pathLength + rec.size;
     this._curLocalFileHeaderOffset -= localChunkSize;
     const centralChunkSize = CENTRAL_HEADER_BASE_LENGTH + rec.pathLength;
     this._centralDirHeaderLen -= centralChunkSize;
 
-    // decreaset offset value on CentralDirectoryHeader
+    // decrease offset values on CentralDirectoryHeader
     for( let i = num; i < this._centralDirHeaderChunks.length; i++ ) {
       const offsetU8 = this._centralDirHeaderChunks[i][3];
       const dv = new DataView(offsetU8.buffer);
       const offset = dv.getUint32(0, true);
-      dv.setUint32(0, offset - localChunkSize, true);
+      
+      // *replace with new Uint8Array instead of editing because it could break snapshoot blobParts in zip() method
+      //dv.setUint32(0, offset - localChunkSize, true);
+      this._centralDirHeaderChunks[i][3] = Uint8Array.from( getAs32ArrayLE(offset - localChunkSize) );
     }
 
     this._pathCount--;
@@ -501,57 +504,38 @@ export default class AnZip {
     return list;
   }
   buffer(): Promise<ArrayBuffer> {
-    return this.wait().then(() => {
-      const blob = this._buildZipBlob();
-      return blob.arrayBuffer?.() || new Promise((resolve) => {
-        const fr = new FileReader();
-        fr.onload = () => {
-          resolve( fr.result as ArrayBuffer );
-        };
-        fr.readAsArrayBuffer(blob);
-      });
-    });
+    return this.zip().then(blob => blobToArrayBuffer(blob));
   }
-  blob(): Blob {
-    this._checkPending();
-    return this._buildZipBlob();
+  blob(): Promise<Blob> {
+    return this.zip();
   }
   /**
   * output as dataURL
   */
-  url(): string {
-    this._checkPending();
-    return URL.createObjectURL( this._buildZipBlob() );
+  url(): Promise<string> {
+    return this.zip().then(blob => URL.createObjectURL(blob));
   }
-  async wait(deepWait?: boolean): Promise<void> {
-    const pendingPromise = this._resolvingCRCPromise;
-    if( !pendingPromise )
-      return Promise.resolve();
-    
-    await pendingPromise;
-    /*
-    while( this._isPending ) {
-      await this._pendingBlobPromise;
-      if( deepWait )
-        await new Promise(r => setTimeout(r, 0));
-    }
-    */
+  urlSync() {
+    return URL.createObjectURL( this.zipSync() );
   }
   /*
-  private _setPendingBlobPromise(promise: Promise<any>) {
-    this._isPending = true;
-    this._pendingBlobPromise = promise.then(() => {
-      if( this._pendingBlobPromise === promise )
-        this._isPending = false;
-    });
-  }
+  * wait until the last CRC calculation is done
   */
+  async wait(deepWait?: boolean): Promise<void> {
+    while( this._resolvingCRCPromise ) {
+      await this._resolvingCRCPromise;
+      if( !deepWait )
+        break;
+    }
+  }
   /**
   * construct a zip structure as a Blob
   */
-  private _buildZipBlob(): Blob {
-    if( this._zippedBlob )
-      return this._zippedBlob;
+  private _buildZipBlob(blobParts?: BlobPart[]): Blob {
+    return new Blob(blobParts || this._createCurrentBlobParts(), {type: 'application/zip'});
+  }
+  private _createCurrentBlobParts(): BlobPart[] {
+
     
     /*
     4.3.16  End of central directory record:
@@ -593,37 +577,47 @@ export default class AnZip {
       [0x00, 0x00]
       // variable size: .ZIP file comment ...
     ));
-    
-    
 
     // join all binary data
     //const chain = this._localFiles.concat(this._centralDirHeaders, endOfCentralDirRecord);
     let chain: (Blob | Uint8Array | Buffer )[] = [];
     chain = chain.concat(...this._localFileChunks, ...this._centralDirHeaderChunks, endOfCentralDirRecord);
 
-    return new Blob(chain, {type: 'application/zip'});
+    return chain;
   }
   /**
-  * close the zip stream
+  * output zip as Blob
   */
-  zip(waitPendingBlobs?: false): Blob;
-  zip(waitPendingBlobs: true): Promise<Blob>;
-  zip(waitPendingBlobs?: boolean) {
-    if( !this._zippedBlob ) {    
-      if( waitPendingBlobs ) {
-        return this.wait().then(() => this.zip());
-      }
+  async zip(close?: boolean): Promise<Blob> {   
+    if( this._zippedBlob )
+      return this._zippedBlob;
+    
+    // snapshot current binary chain
+    const blobParts = this._createCurrentBlobParts();
+    // wait pending crc
+    await this._resolvingCRCPromise;
+    
+    const blob = this._buildZipBlob( blobParts );
+    if( close )
+      this._close(blob);
+    return blob;
+  }
+  zipSync(close?: boolean): Blob {
+    if( this._zippedBlob )
+      return this._zippedBlob;
+    
+    this._checkPending();
+    const blob = this._buildZipBlob( this._createCurrentBlobParts() );
+    if( close )
+      this._close(blob);
 
-      this._checkPending();
-      const blob = this._buildZipBlob();
-      this._zippedBlob = blob;
-
-      // clear constructed parts
-      this._localFileChunks = [];
-      this._centralDirHeaderChunks = [];
-    }
-
-    return this._zippedBlob;
+    return blob;
+  }
+  private _close(blob: Blob) {
+    this._zippedBlob = blob;
+    // clear constructed parts
+    this._localFileChunks = [];
+    this._centralDirHeaderChunks = [];
   }
 }
 
@@ -640,7 +634,7 @@ for( let i = 0; i < 256; i++ ) {
   CRC32Table[i] = val;
 }
 
-function getCRC32(dat: number[] | Uint8Array | Buffer) {
+function calculateCRC32(dat: number[] | Uint8Array | Buffer) {
   let crc = 0xFFFFFFFF;
   for( let i = 0, len = dat.length; i < len; i++ ) {
     crc = CRC32Table[(crc ^ dat[i]) & 0xFF] ^ (crc >>> 8);
@@ -648,6 +642,28 @@ function getCRC32(dat: number[] | Uint8Array | Buffer) {
   return (crc ^ 0xFFFFFFFF) >>> 0;
 }
 
+function getBlobCRC(blob: Blob): Promise<number> {
+  // calculate CRC
+  return blobToArrayBuffer(blob).then((buffer) => {
+    // write CRC asynchronously
+    return calculateCRC32( new Uint8Array(buffer) );
+  });
+}
+
+function blobToArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
+  // create ArrayBuffer from Blob
+  return blob.arrayBuffer?.() || new Promise<ArrayBuffer>((res) => {
+    let fr = new FileReader();
+    fr.onload = (ev) => {
+      res( ev.target!.result as ArrayBuffer );
+    };
+    fr.onerror = () => {
+      throw new Error('could not read it as ArrayBuffer');
+    };
+    fr.readAsArrayBuffer(blob);
+    fr = null as any;
+  });
+}
 
 /**
  * 32bit number to little-endian byte array
